@@ -28,11 +28,6 @@
 #  define FMT_RANGES_TEST_ENABLE_C_STYLE_ARRAY
 #endif
 
-#if !FMT_MSC_VERSION || FMT_MSC_VERSION > 1910
-#  define FMT_RANGES_TEST_ENABLE_JOIN
-#  define FMT_RANGES_TEST_ENABLE_FORMAT_STRUCT
-#endif
-
 #ifdef FMT_RANGES_TEST_ENABLE_C_STYLE_ARRAY
 TEST(ranges_test, format_array) {
   int arr[] = {1, 2, 3, 5, 7, 11};
@@ -52,6 +47,8 @@ TEST(ranges_test, format_array_of_literals) {
 }
 #endif  // FMT_RANGES_TEST_ENABLE_C_STYLE_ARRAY
 
+struct unformattable {};
+
 TEST(ranges_test, format_vector) {
   auto v = std::vector<int>{1, 2, 3, 5, 7, 11};
   EXPECT_EQ(fmt::format("{}", v), "[1, 2, 3, 5, 7, 11]");
@@ -70,6 +67,9 @@ TEST(ranges_test, format_vector) {
   EXPECT_EQ(fmt::format("{:n}", vvc), "['a', 'b', 'c'], ['a', 'b', 'c']");
   EXPECT_EQ(fmt::format("{:n:n}", vvc), "'a', 'b', 'c', 'a', 'b', 'c'");
   EXPECT_EQ(fmt::format("{:n:n:}", vvc), "a, b, c, a, b, c");
+
+  EXPECT_FALSE(fmt::is_formattable<unformattable>::value);
+  EXPECT_FALSE(fmt::is_formattable<std::vector<unformattable>>::value);
 }
 
 TEST(ranges_test, format_nested_vector) {
@@ -88,6 +88,8 @@ TEST(ranges_test, format_map) {
   auto m = std::map<std::string, int>{{"one", 1}, {"two", 2}};
   EXPECT_EQ(fmt::format("{}", m), "{\"one\": 1, \"two\": 2}");
   EXPECT_EQ(fmt::format("{:n}", m), "\"one\": 1, \"two\": 2");
+
+  EXPECT_FALSE((fmt::is_formattable<std::map<int, unformattable>>::value));
 }
 
 struct test_map_value {};
@@ -126,7 +128,7 @@ TEST(ranges_test, format_set) {
 
 // Models std::flat_set close enough to test if no ambiguous lookup of a
 // formatter happens due to the flat_set type matching is_set and
-// is_container_adaptor_like.
+// is_container_adaptor.
 template <typename T> class flat_set {
  public:
   using key_type = T;
@@ -151,6 +153,7 @@ template <typename T> class flat_set {
 TEST(ranges_test, format_flat_set) {
   EXPECT_EQ(fmt::format("{}", flat_set<std::string>{"one", "two"}),
             "{\"one\", \"two\"}");
+  EXPECT_FALSE(fmt::is_formattable<flat_set<unformattable>>::value);
 }
 
 namespace adl {
@@ -174,8 +177,6 @@ TEST(ranges_test, format_pair) {
   EXPECT_EQ(fmt::format("{:n}", p), "421.5");
 }
 
-struct unformattable {};
-
 TEST(ranges_test, format_tuple) {
   auto t =
       std::tuple<int, float, std::string, char>(42, 1.5f, "this is tuple", 'i');
@@ -185,7 +186,6 @@ TEST(ranges_test, format_tuple) {
   EXPECT_EQ(fmt::format("{}", std::tuple<>()), "()");
 
   EXPECT_TRUE((fmt::is_formattable<std::tuple<>>::value));
-  EXPECT_FALSE((fmt::is_formattable<unformattable>::value));
   EXPECT_FALSE((fmt::is_formattable<std::tuple<unformattable>>::value));
   EXPECT_FALSE((fmt::is_formattable<std::tuple<unformattable, int>>::value));
   EXPECT_FALSE((fmt::is_formattable<std::tuple<int, unformattable>>::value));
@@ -213,7 +213,6 @@ TEST(ranges_test, tuple_parse_calls_element_parse) {
   EXPECT_THROW(f.parse(ctx), bad_format);
 }
 
-#ifdef FMT_RANGES_TEST_ENABLE_FORMAT_STRUCT
 struct tuple_like {
   int i;
   std::string str;
@@ -233,9 +232,12 @@ auto get(const tuple_like& t) noexcept -> decltype(t.get<N>()) {
   return t.get<N>();
 }
 
+// https://github.com/llvm/llvm-project/issues/39218
+FMT_PRAGMA_CLANG(diagnostic ignored "-Wmismatched-tags")
+
 namespace std {
 template <>
-struct tuple_size<tuple_like> : std::integral_constant<size_t, 2> {};
+struct tuple_size<tuple_like> : public std::integral_constant<size_t, 2> {};
 
 template <size_t N> struct tuple_element<N, tuple_like> {
   using type = decltype(std::declval<tuple_like>().get<N>());
@@ -246,7 +248,6 @@ TEST(ranges_test, format_struct) {
   auto t = tuple_like{42, "foo"};
   EXPECT_EQ(fmt::format("{}", t), "(42, \"foo\")");
 }
-#endif  // FMT_RANGES_TEST_ENABLE_FORMAT_STRUCT
 
 TEST(ranges_test, format_to) {
   char buf[10];
@@ -329,7 +330,7 @@ template <typename T> class noncopyable_range {
   explicit noncopyable_range(Args&&... args)
       : vec(std::forward<Args>(args)...) {}
 
-  noncopyable_range(noncopyable_range const&) = delete;
+  noncopyable_range(const noncopyable_range&) = delete;
   noncopyable_range(noncopyable_range&) = delete;
 
   auto begin() -> iterator { return vec.begin(); }
@@ -394,14 +395,6 @@ TEST(ranges_test, join) {
   EXPECT_EQ(fmt::format("{}", join(v4, " ")), "0 1 0");
 }
 
-#ifdef __cpp_lib_byte
-TEST(ranges_test, join_bytes) {
-  auto v = std::vector<std::byte>{std::byte(1), std::byte(2), std::byte(3)};
-  EXPECT_EQ(fmt::format("{}", fmt::join(v, ", ")), "1, 2, 3");
-}
-#endif
-
-#ifdef FMT_RANGES_TEST_ENABLE_JOIN
 TEST(ranges_test, join_tuple) {
   // Value tuple args.
   auto t1 = std::tuple<char, int, float>('a', 1, 2.0f);
@@ -420,7 +413,11 @@ TEST(ranges_test, join_tuple) {
   auto t4 = std::tuple<float>(4.0f);
   EXPECT_EQ(fmt::format("{}", fmt::join(t4, "/")), "4");
 
-#  if FMT_TUPLE_JOIN_SPECIFIERS
+  // Tuple-like.
+  auto t5 = tuple_like{42, "foo"};
+  EXPECT_EQ(fmt::format("{}", fmt::join(t5, ", ")), "42, foo");
+
+#if FMT_TUPLE_JOIN_SPECIFIERS
   // Specs applied to each element.
   auto t5 = std::tuple<int, int, long>(-3, 100, 1);
   EXPECT_EQ(fmt::format("{:+03}", fmt::join(t5, ", ")), "-03, +100, +01");
@@ -433,13 +430,7 @@ TEST(ranges_test, join_tuple) {
   int y = -1;
   auto t7 = std::tuple<int, int&, const int&>(3, y, y);
   EXPECT_EQ(fmt::format("{:03}", fmt::join(t7, ", ")), "003, -01, -01");
-#  endif
-}
-
-TEST(ranges_test, join_initializer_list) {
-  EXPECT_EQ(fmt::format("{}", fmt::join({1, 2, 3}, ", ")), "1, 2, 3");
-  EXPECT_EQ(fmt::format("{}", fmt::join({"fmt", "rocks", "!"}, " ")),
-            "fmt rocks !");
+#endif
 }
 
 struct zstring_sentinel {};
@@ -453,7 +444,7 @@ struct zstring {
   auto end() const -> zstring_sentinel { return {}; }
 };
 
-#  ifdef __cpp_lib_ranges
+#ifdef __cpp_lib_ranges
 struct cpp20_only_range {
   struct iterator {
     int val = 0;
@@ -483,7 +474,7 @@ struct cpp20_only_range {
 };
 
 static_assert(std::input_iterator<cpp20_only_range::iterator>);
-#  endif
+#endif
 
 TEST(ranges_test, join_sentinel) {
   auto hello = zstring{"hello"};
@@ -511,13 +502,13 @@ TEST(ranges_test, join_range) {
   const auto z = std::vector<int>(3u, 0);
   EXPECT_EQ(fmt::format("{}", fmt::join(z, ",")), "0,0,0");
 
-#  ifdef __cpp_lib_ranges
+#ifdef __cpp_lib_ranges
   EXPECT_EQ(fmt::format("{}", cpp20_only_range{.lo = 0, .hi = 5}),
             "[0, 1, 2, 3, 4]");
   EXPECT_EQ(
       fmt::format("{}", fmt::join(cpp20_only_range{.lo = 0, .hi = 5}, ",")),
       "0,1,2,3,4");
-#  endif
+#endif
 }
 
 namespace adl {
@@ -532,8 +523,6 @@ auto end(const vec& v) -> const int* { return v.n + 2; }
 TEST(ranges_test, format_join_adl_begin_end) {
   EXPECT_EQ(fmt::format("{}", fmt::join(adl::vec(), "/")), "42/43");
 }
-
-#endif  // FMT_RANGES_TEST_ENABLE_JOIN
 
 #if defined(__cpp_lib_ranges) && __cpp_lib_ranges >= 202207L
 TEST(ranges_test, nested_ranges) {
@@ -606,12 +595,11 @@ TEST(ranges_test, vector_char) {
 
 TEST(ranges_test, container_adaptor) {
   {
-    using fmt::detail::is_container_adaptor_like;
     using T = std::nullptr_t;
-    static_assert(is_container_adaptor_like<std::stack<T>>::value, "");
-    static_assert(is_container_adaptor_like<std::queue<T>>::value, "");
-    static_assert(is_container_adaptor_like<std::priority_queue<T>>::value, "");
-    static_assert(!is_container_adaptor_like<std::vector<T>>::value, "");
+    static_assert(fmt::is_container_adaptor<std::stack<T>>::value, "");
+    static_assert(fmt::is_container_adaptor<std::queue<T>>::value, "");
+    static_assert(fmt::is_container_adaptor<std::priority_queue<T>>::value, "");
+    static_assert(!fmt::is_container_adaptor<std::vector<T>>::value, "");
   }
 
   {
@@ -661,6 +649,8 @@ TEST(ranges_test, container_adaptor) {
     m.push(2);
     EXPECT_EQ(fmt::format("{}", m), "[1, 2]");
   }
+
+  EXPECT_FALSE(fmt::is_formattable<std::stack<unformattable>>::value);
 }
 
 struct tieable {
@@ -720,10 +710,17 @@ struct codec_mask {
   int except = 0;
 };
 
+// A named functor instead of a lambda to avoid -Wsubobject-linkage: a lambda
+// gives the filter_view type internal linkage, which propagates to the
+// formatter base class via format_as.
+struct not_equal {
+  int value;
+  bool operator()(int c) const { return c != value; }
+};
+
 auto format_as(codec_mask mask) {
-  // Careful not to capture param by reference here, it will dangle.
   return codec_mask::codecs |
-         std::views::filter([mask](auto c) { return c != mask.except; });
+         std::views::filter(not_equal{mask.except});
 }
 }  // namespace views_filter_view_test
 
@@ -793,3 +790,23 @@ struct not_range {
   void end() const {}
 };
 static_assert(!fmt::is_formattable<not_range>{}, "");
+
+struct test_adaptor {
+  using container_type = std::vector<int>;
+  std::vector<int> c = {1, 2, 3};
+};
+
+namespace fmt {
+template <> struct is_container_adaptor<test_adaptor> : std::false_type {};
+
+template <> struct formatter<test_adaptor> : formatter<string_view> {
+  auto format(const test_adaptor&, format_context& ctx) const
+      -> format_context::iterator {
+    return formatter<string_view>::format("test", ctx);
+  }
+};
+}  // namespace fmt
+
+TEST(ranges_test, container_adaptor_opt_out) {
+  EXPECT_EQ(fmt::format("{}", test_adaptor()), "test");
+}
